@@ -3,8 +3,8 @@ import time
 from datetime import datetime
 
 BASE_URL = "https://demo.openspecimen.org"
-USERNAME = "amol@krishagni.com"
-PASSWORD = "Login@123"
+USERNAME = "<username>"
+PASSWORD = "<password>"
 
 def get_token():
     url = f"{BASE_URL}/rest/ng/sessions"
