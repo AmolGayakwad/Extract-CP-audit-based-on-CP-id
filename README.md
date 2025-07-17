@@ -23,21 +23,20 @@ This script does the following:
 1. Download or clone this repository.  
 2. Open a terminal and navigate to the folder containing the script.  
 3. Run the script with the command: 
-   python3 cp_audit_export.py
-When prompted, enter:
-
-Collection Protocol ID
-
-Start date (format: YYYY-MM-DD)
-
-End date (format: YYYY-MM-DD)
+   python3 cp_audit.py
+   
+      When prompted, enter:
+      
+      - Collection Protocol ID      
+      - Start date (format: YYYY-MM-DD)      
+      - End date (format: YYYY-MM-DD)
 
 The script will save the transformed audit CSV as:
 cp_<CP_ID>_audit_transformed.csv
 
 It will also delete the downloaded ZIP and extracted files after processing.
 
-What I Learned
+## What I Learned
 - How to authenticate with OpenSpecimen’s REST API and get a session token
 - How to send POST and GET requests with headers and JSON payloads using Python’s requests library
 - How to convert dates from YYYY-MM-DD format to Unix epoch time in milliseconds
