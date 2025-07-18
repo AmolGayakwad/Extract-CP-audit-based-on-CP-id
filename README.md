@@ -32,7 +32,7 @@ This script does the following:
       - End date (format: YYYY-MM-DD)
 
 The script will save the transformed audit CSV as:
-cp_<CP_ID>_audit_transformed.csv
+CP_Audit-<cp_id>.csv
 
 It will also delete the downloaded ZIP and extracted files after processing.
 
