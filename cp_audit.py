@@ -4,6 +4,7 @@ import zipfile
 import os
 import csv
 from datetime import datetime
+from collections import defaultdict
 
 BASE_URL = "https://demo.openspecimen.org"
 USERNAME = "amol@krishagni.com"
@@ -11,48 +12,45 @@ PASSWORD = "Login@123"
 
 def get_token():
     url = f"{BASE_URL}/rest/ng/sessions"
-    payload = {
+    data = {
         "loginName": USERNAME,
         "password": PASSWORD,
         "domainName": "openspecimen"
     }
     headers = {"Content-Type": "application/json"}
-    response = requests.post(url, json=payload, headers=headers)
-    response.raise_for_status()
-    return response.json()["token"]
+    resp = requests.post(url, json=data, headers=headers)
+    resp.raise_for_status()
+    return resp.json()["token"]
 
 def to_millis(date_str):
     dt = datetime.strptime(date_str, "%Y-%m-%d")
     return int(time.mktime(dt.timetuple()) * 1000)
 
-def export_audit(cp_id, start_millis, end_millis, token):
+def export_audit(cp_id, start_ms, end_ms, token):
     url = f"{BASE_URL}/rest/ng/audit/export-revisions"
-    headers = {
-        "X-OS-API-TOKEN": token,
-        "Content-Type": "application/json"
-    }
     payload = {
-        "startDate": start_millis,
-        "endDate": end_millis,
+        "startDate": start_ms,
+        "endDate": end_ms,
         "recordIds": [int(cp_id)],
         "entities": ["CollectionProtocol"],
         "includeModifiedProps": True
     }
-    response = requests.post(url, json=payload, headers=headers)
-    response.raise_for_status()
-    return response.json().get("fileId")
+    headers = {"X-OS-API-TOKEN": token, "Content-Type": "application/json"}
+    resp = requests.post(url, json=payload, headers=headers)
+    resp.raise_for_status()
+    return resp.json().get("fileId")
 
 def download_zip(file_id, cp_id, token):
     url = f"{BASE_URL}/rest/ng/audit/revisions-file?fileId={file_id}"
     headers = {"X-OS-API-TOKEN": token}
     filename = f"cp_{cp_id}_audit.zip"
-    response = requests.get(url, headers=headers, stream=True)
-    response.raise_for_status()
+    resp = requests.get(url, headers=headers, stream=True)
+    resp.raise_for_status()
     with open(filename, "wb") as f:
-        for chunk in response.iter_content(8192):
+        for chunk in resp.iter_content(8192):
             if chunk:
                 f.write(chunk)
-    print(f"Downloaded zip file: {filename}")
+    print(f"Downloaded {filename}")
     return filename
 
 def unzip_file(zip_path):
@@ -60,36 +58,84 @@ def unzip_file(zip_path):
         zip_ref.extractall()
         return zip_ref.namelist()
 
-def process_csv(input_csv, output_csv, skip_header_lines=7):
-    with open(input_csv, encoding='utf-8') as infile:
-        # skip metadata lines before CSV header
-        for _ in range(skip_header_lines):
-            next(infile)
+def split_changes(change_log):
+    parts = []
+    current = ''
+    level = 0
+    for ch in change_log:
+        if ch == ',' and level == 0:
+            parts.append(current.strip())
+            current = ''
+        else:
+            if ch in '[{':
+                level += 1
+            elif ch in ']}':
+                level -= 1
+            current += ch
+    if current:
+        parts.append(current.strip())
+    return parts
 
-        reader = csv.DictReader(infile)
-        with open(output_csv, 'w', newline='', encoding='utf-8') as outfile:
-            fieldnames = ['Date', 'User', 'Operation', 'Field Name', 'Old Value', 'New Value', 'Record ID', 'Record Type']
-            writer = csv.DictWriter(outfile, fieldnames=fieldnames)
-            writer.writeheader()
+def process_csv(input_csv, output_csv, cp_id):
+    # Read CSV, parse change log, pivot to wide format and write output
+    data_rows = []
 
-            for row in reader:
-                change_log = row.get('Change Log', '')
-                if change_log:
-                    changes = change_log.split(',')
-                    for change in changes:
-                        change = change.strip()
-                        if '=' in change:
-                            field, new_value = change.split('=', 1)
-                            writer.writerow({
-                                'Date': row.get('Timestamp', '').strip(),
-                                'User': row.get('User', '').strip(),
-                                'Operation': row.get('Operation', '').strip(),
-                                'Field Name': field.strip(),
-                                'Old Value': '',  # Not available in this export
-                                'New Value': new_value.strip(),
-                                'Record ID': row.get('Record ID', '').strip(),
-                                'Record Type': row.get('Record Type', '').strip()
-                            })
+    with open(input_csv, encoding='utf-8') as f:
+        # skip first 7 header lines
+        for _ in range(7):
+            next(f)
+        reader = csv.DictReader(f)
+
+        for row in reader:
+            changes_str = row.get('Change Log', '')
+            if not changes_str:
+                continue
+
+            changes = split_changes(changes_str)
+            base = {
+                'CP ID': cp_id,
+                'Date': row.get('Timestamp', '').strip(),
+                'User': row.get('User', '').strip(),
+                'Operation': row.get('Operation', '').strip()
+            }
+
+            for c in changes:
+                if '=' in c:
+                    field, val = c.split('=', 1)
+                    data_rows.append({
+                        'CP ID': base['CP ID'],
+                        'Date': base['Date'],
+                        'User': base['User'],
+                        'Operation': base['Operation'],
+                        'Field Name': field.strip(),
+                        'Changed Value': val.strip()
+                    })
+
+    # Group rows by (CP ID, Date, User, Operation)
+    grouped = {}
+    for r in data_rows:
+        key = (r['CP ID'], r['Date'], r['User'], r['Operation'])
+        if key not in grouped:
+            grouped[key] = {}
+        # last value wins if duplicate field
+        grouped[key][r['Field Name']] = r['Changed Value']
+
+    # Collect all unique field names
+    all_fields = set()
+    for vals in grouped.values():
+        all_fields.update(vals.keys())
+    all_fields = sorted(all_fields)
+
+    # Write wide CSV
+    with open(output_csv, 'w', newline='', encoding='utf-8') as f_out:
+        writer = csv.writer(f_out)
+        header = ['CP ID', 'Date', 'User', 'Operation'] + all_fields
+        writer.writerow(header)
+        for key, fields in grouped.items():
+            row = list(key)  # CP ID, Date, User, Operation
+            for field in all_fields:
+                row.append(fields.get(field, ''))
+            writer.writerow(row)
 
 def main():
     cp_id = input("Enter Collection Protocol ID: ").strip()
@@ -98,50 +144,44 @@ def main():
 
     try:
         start_ms = to_millis(start_date)
-        end_ms = to_millis(end_date) + 86399999  # end of day
-    except Exception:
-        print("Invalid date format! Please use YYYY-MM-DD.")
+        end_ms = to_millis(end_date) + 86399999
+    except:
+        print("Wrong date format, use YYYY-MM-DD")
         return
 
     try:
         token = get_token()
         file_id = export_audit(cp_id, start_ms, end_ms, token)
-
         if not file_id:
-            print("Export is running in background. Please try again later.")
+            print("Export is still running. Try again later.")
             return
 
         zip_file = download_zip(file_id, cp_id, token)
-        extracted_files = unzip_file(zip_file)
+        files = unzip_file(zip_file)
 
         audit_csv = None
-        for f in extracted_files:
+        for f in files:
             if f.startswith("os_core_objects_revisions") and f.endswith(".csv"):
                 audit_csv = f
                 break
 
         if not audit_csv:
-            print("Audit CSV file not found in the extracted files.")
+            print("Audit CSV file not found!")
             return
 
-        output_csv = f"cp_{cp_id}_audit_transformed.csv"
-        process_csv(audit_csv, output_csv)
-        print(f"Audit data processed and saved to {output_csv}")
+        output_csv = f"cp_{cp_id}_audit_wide.csv"
+        process_csv(audit_csv, output_csv, cp_id)
+        print(f"Output saved to {output_csv}")
 
-        # Delete ZIP and extracted files
-        if os.path.exists(zip_file):
-            os.remove(zip_file)
-            print(f"Deleted zip file: {zip_file}")
-
-        for f in extracted_files:
+        os.remove(zip_file)
+        for f in files:
             if os.path.exists(f):
                 os.remove(f)
-                print(f"Deleted extracted file: {f}")
 
-    except requests.HTTPError as http_err:
-        print(f"HTTP error: {http_err.response.status_code} - {http_err.response.text}")
+    except requests.HTTPError as e:
+        print(f"HTTP error {e.response.status_code}: {e.response.text}")
     except Exception as e:
-        print(f"Error occurred: {e}")
+        print(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
